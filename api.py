@@ -1,19 +1,16 @@
 from typing import Union
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Path, HTTPException
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
 import cloudpickle
+from fastapi.responses import JSONResponse
+from io import StringIO
 
 app = FastAPI(title="Customer Churn Prediction",description="This API takes in user data and predicts weather the user will re-subscribe to the service or not", version='1.0.0')
 
-# health of the api
-# predict
-# bulk predict
-# model information
 
 
 try:
-    with open("customer-churn-prediction/model/model.pickle","rb") as f:
+    with open("model/model.pickle","rb") as f:
      model = cloudpickle.load(f)
      print("Model Loaded successfully!!")
 except Exception as e:
@@ -21,7 +18,7 @@ except Exception as e:
     print(e)
 
 try:
-    with open("customer-churn-prediction/model/pipe.pickle","rb") as f:
+    with open("model/pipe.pickle","rb") as f:
      pipe = cloudpickle.load(f)
      print("Pipeline Loaded successfully!!")
 except Exception as e:
@@ -66,7 +63,15 @@ def root():
 
 
 @app.post("/predict")
-def predict(duration_of_subscription: int, gender: str, city: int, registered_via: int, payment_method_id: int, payment_plan_days: int, actual_amount_paid: int, is_auto_renew: int):
+def predict(duration_of_subscription: int, 
+            gender: str, 
+            city: int, 
+            registered_via: int, 
+            payment_method_id: int, 
+            payment_plan_days: int, 
+            actual_amount_paid: int, 
+            is_auto_renew: int):
+    
     if gender == "male" or gender == "Male":
        male = 1
        female =0
@@ -84,6 +89,33 @@ def predict(duration_of_subscription: int, gender: str, city: int, registered_vi
     except Exception as e:
        print(e)
 
+@app.post("/bulkpredict")
+def bulkpredict(file: UploadFile = File(...)):
+      
+      content = file.file.read()
+      
+      try:
+        df = pd.read_csv(StringIO(content.decode("utf-8")))
+        print("data loaded successfully")
+      except Exception as e:
+         raise HTTPException(status_code=500, detail=f'CSV not loaded correctly: {e}')
+
+      try:
+        trnsformed = pipe.transform(df)
+        print("data transformed")
+      except Exception as e:
+        raise HTTPException(status_code=400, detail=f'data not transformed correctly: {e}')
+
+      try:
+        predict = model.predict(trnsformed)
+        df["predictions"] = predict
+        print("Predictions done")
+      except Exception as e:
+         raise HTTPException(status_code=500, detail=f'prediction not done correctly: {e}')
+      
+      return df.to_dict(orient="records")
 
 
-
+@app.get("/health")
+def health():
+   return JSONResponse(content={"status": "ok","Message":"API is Healthy"},status_code=200)
