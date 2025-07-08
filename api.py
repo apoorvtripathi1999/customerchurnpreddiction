@@ -1,11 +1,41 @@
-from typing import Union
+from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Path, HTTPException
 import pandas as pd
 import cloudpickle
 from fastapi.responses import JSONResponse
 from io import StringIO
+import os
+import json
+from pydantic import BaseModel
+from datetime import date
 
 app = FastAPI(title="Customer Churn Prediction",description="This API takes in user data and predicts weather the user will re-subscribe to the service or not", version='1.0.0')
+json_path = "data/userdata.json"
+
+# Performing validation using pydantic
+class dataval(BaseModel):
+   user_id: Optional[int] = None;	
+   city: int;
+   gender: str;
+   registered_via: int;	
+   payment_method_id: int;
+   payment_plan_days: int;
+   actual_amount_paid: int;	
+   is_auto_renew: int;	
+   transaction_date: date;
+   membership_expire_date: date
+
+# creating a fuction for creating new users
+def valid_user(user: int):
+   if user == None:
+      with open(json_path, "r") as f:
+         data = json.load(f)
+         users = list(data.keys())
+         last_user = int(users[-1])
+         user = last_user + 1
+         return user
+   else:
+       return user
 
 
 
@@ -17,6 +47,7 @@ except Exception as e:
     print("Model could not be loaded, exception:")
     print(e)
 
+
 try:
     with open("model/pipe.pickle","rb") as f:
      pipe = cloudpickle.load(f)
@@ -24,6 +55,7 @@ try:
 except Exception as e:
     print("Pipeline could not be loaded, exception:")
     print(e)
+
 
 @app.get("/")
 def root():
@@ -62,60 +94,204 @@ def root():
             }
 
 
-@app.post("/predict")
-def predict(duration_of_subscription: int, 
-            gender: str, 
-            city: int, 
-            registered_via: int, 
-            payment_method_id: int, 
-            payment_plan_days: int, 
-            actual_amount_paid: int, 
-            is_auto_renew: int):
-    
-    if gender == "male" or gender == "Male":
-       male = 1
-       female =0
-    else:
-       male = 0
-       female = 1
-    
-    data = [duration_of_subscription,female,male,city,registered_via,payment_method_id,payment_plan_days,actual_amount_paid,is_auto_renew]
-    print(data)
+@app.get("/health")
+def health():
+   return JSONResponse(content={"status": "ok","Message":"API is Healthy"},status_code=200)
 
-    try:
-       prediction = model.predict([data])
-       return {"Predicted Value": str(prediction[0])}
+
+@app.post("/predict")
+def predict(
+   city: int,
+   gender: str,
+   registered_via: int,	
+   payment_method_id: int,
+   payment_plan_days: int,
+   actual_amount_paid: int,	
+   is_auto_renew: int,	
+   transaction_date: date,
+   membership_expire_date: date,
+   user_id: Optional[int] = None	):
     
+    result = {}
+
+    data = dataval(
+         user_id = user_id,
+         city = city,
+         gender = gender,
+         registered_via =  registered_via,	
+         payment_method_id = payment_method_id,
+         payment_plan_days = payment_plan_days,
+         actual_amount_paid = actual_amount_paid,
+         is_auto_renew = is_auto_renew,
+         transaction_date = transaction_date,
+         membership_expire_date = membership_expire_date)
+    
+    user = valid_user(data.user_id)
+
+    pipe_data = [[     	
+         data.city,
+         data.gender,
+         data.registered_via,	
+         data.payment_method_id,
+         data.payment_plan_days,
+         data.actual_amount_paid,	
+         data.is_auto_renew,	
+         data.transaction_date,
+         data.membership_expire_date]]
+   
+    print(data)
+    # transforming data using the pipeline and creating a trnaformed dataframe
+    try:
+      transformed = pipe.transform(pipe_data)
+      df_transformed = pd.DataFrame(transformed, columns=["duration_of_subscription","female","male","city","registered_via","payment_method_id","payment_plan_days","actual_amount_paid","is_auto_renew"])
+    except:
+       raise HTTPException(status_code=500, detail="not able to tranform data through the pipeline")
+    
+
+    # Preforming prediction on the transformed data and updating the user details file
+    try:
+       df_transformed["predictions"] = model.predict(df_transformed)
+       temp_result = df_transformed.iloc[0].to_dict()
+       result[user] = temp_result
+       if os.path.exists(json_path):
+          try:
+             with open(json_path, "r") as f:
+               json_file = json.load(f)
+          except:
+             raise HTTPException(status_code=500, detail="Not able to load the json file")
+       else:
+          json_file = {}
+
+       json_file.update(result)
+
+       with open(json_path,"w") as f:
+          json.dump(json_file, f, indent=2)
+
+       return result
     except Exception as e:
        print(e)
+
 
 @app.post("/bulkpredict")
 def bulkpredict(file: UploadFile = File(...)):
       
+      #reading the file
       content = file.file.read()
       
+      #loading the file and converting it to dataframe
       try:
         df = pd.read_csv(StringIO(content.decode("utf-8")))
         print("data loaded successfully")
       except Exception as e:
          raise HTTPException(status_code=500, detail=f'CSV not loaded correctly: {e}')
+      
+      model_db = df.iloc[:,1:]
+      users = df.iloc[:,0]
 
+      # Creating new users
+      users = users.to_numpy()
+      for i in range(0,len(users)):
+         users[i] = valid_user(users[i])
+
+      # fitting the dataframe to the pipeline
       try:
-        trnsformed = pipe.transform(df)
+        trnsformed = pipe.transform(model_db)
         print("data transformed")
       except Exception as e:
         raise HTTPException(status_code=400, detail=f'data not transformed correctly: {e}')
 
+      # pridicting the values and storing the predicted values in predict variable
       try:
         predict = model.predict(trnsformed)
-        df["predictions"] = predict
+        trans_df = pd.DataFrame(trnsformed, columns=["duration_of_subscription","female","male","city","registered_via","payment_method_id","payment_plan_days","actual_amount_paid","is_auto_renew"])
+        trans_df["predictions"] = predict
         print("Predictions done")
       except Exception as e:
          raise HTTPException(status_code=500, detail=f'prediction not done correctly: {e}')
+      final = {}
+
+      # creating a key value pair JSON object(final result)
+      try:
+         trans_json = trans_df.to_dict(orient="records")
+         for i in range(0,len(users)):
+            final[str(users[i])] = trans_json[i]
+      except Exception as e:
+         print(f'Not able to generate the JSON result: {e}')
+    
+      # Saving and updating the json userdata file
+      if os.path.exists(json_path):
+         try:
+           with open(json_path, "r") as f:
+             data = json.load(f)
+         except Exception as e:
+            print(e)
+            data = {}
+      else:
+         data = {}
       
-      return df.to_dict(orient="records")
+      data.update(final)
+
+      try:
+         with open (json_path, "w") as f:
+            json.dump(data,f, indent=2)
+      except Exception as e:
+         print(e)
+      
+      return final
 
 
-@app.get("/health")
-def health():
-   return JSONResponse(content={"status": "ok","Message":"API is Healthy"},status_code=200)
+@app.post("/getuser")
+def getuser(target: int):
+      
+      # Opening the json file
+      if os.path.exists(json_path):
+         try:
+           with open(json_path, "r") as f:
+             data = json.load(f)
+         except Exception as e:
+            print(e)
+            data = {}
+      else:
+         data = {}
+      
+      final = {}
+      
+      # searching for the target key and returning the result as a dictionary
+      try:
+          array_of_keys = data.keys()
+          for i in range(0,len(array_of_keys)): 
+             if array_of_keys[i] == str(target): # converting since array_of_keys is a list of string
+                final.append(int(data[i])) # converting since key should be an int
+         
+          return final
+      except:
+         raise HTTPException(status_code=500, detail="Not able to fetch the list")
+    
+
+@app.post("/deleteuser")
+def deleteuser(target: int):
+    # Opening the json file
+      if os.path.exists(json_path):
+         try:
+           with open(json_path, "r") as f:
+             data = json.load(f)
+         except Exception as e:
+            print(e)
+            data = {}
+      else:
+         data = {}
+      
+      # searching for the target key and deleting it from the JSON file 
+      try:
+          array_of_keys = data.keys()
+          for i in range(0,len(array_of_keys)): 
+             if array_of_keys[i] == str(target): # converting since array_of_keys is a list of string
+                del data[target]
+          
+          with open(json_path, "w") as f:
+             json.dump(data, f, indent=2)  
+         
+          return data
+      except:
+         raise HTTPException(status_code=500, detail="Not able to fetch the list")
+
