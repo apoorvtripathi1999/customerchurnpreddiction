@@ -11,6 +11,7 @@ from datetime import date
 
 app = FastAPI(title="Customer Churn Prediction",description="This API takes in user data and predicts weather the user will re-subscribe to the service or not", version='1.0.0')
 json_path = "data/userdata.json"
+user_path = "data/users.json"
 
 # Performing validation using pydantic
 class dataval(BaseModel):
@@ -25,20 +26,28 @@ class dataval(BaseModel):
    transaction_date: date;
    membership_expire_date: date
 
-# creating a fuction for creating new users
+# fuction for creating new users and validating existing users
 def valid_user(user: int):
-   if user == None:
-      with open(json_path, "r") as f:
+   if pd.isna(user):
+      with open(user_path, "r") as f:
          data = json.load(f)
-         users = list(data.keys())
-         last_user = int(users[-1])
-         user = last_user + 1
+         max_user = max(data)
+         user = max_user + 1
+         data.append(int(user))
+         with open(user_path, "w") as f:
+            json.dump(data,f,indent=2)
          return user
    else:
+       with open(user_path, "r") as f:
+         data = json.load(f)
+         if user not in data:
+            data.append(int(user))
+            with open(user_path, "w") as f:
+               json.dump(data,f,indent=2)
        return user
 
 
-
+# loading the model
 try:
     with open("model/model.pickle","rb") as f:
      model = cloudpickle.load(f)
@@ -47,7 +56,7 @@ except Exception as e:
     print("Model could not be loaded, exception:")
     print(e)
 
-
+# loading the pipeline
 try:
     with open("model/pipe.pickle","rb") as f:
      pipe = cloudpickle.load(f)
@@ -192,6 +201,7 @@ def bulkpredict(file: UploadFile = File(...)):
       users = users.to_numpy()
       for i in range(0,len(users)):
          users[i] = valid_user(users[i])
+      users = users.astype(int)
 
       # fitting the dataframe to the pipeline
       try:
@@ -248,22 +258,18 @@ def getuser(target: int):
          try:
            with open(json_path, "r") as f:
              data = json.load(f)
-         except Exception as e:
-            print(e)
-            data = {}
+             print("data loaded successfully")
+         except:
+            raise HTTPException(status_code=500, detail="not able to read the json file")
       else:
-         data = {}
-      
-      final = {}
-      
+         raise HTTPException(status_code=500, detail="Json file not read correctly")
+
       # searching for the target key and returning the result as a dictionary
       try:
-          array_of_keys = data.keys()
-          for i in range(0,len(array_of_keys)): 
-             if array_of_keys[i] == str(target): # converting since array_of_keys is a list of string
-                final.append(int(data[i])) # converting since key should be an int
-         
-          return final
+          user_data = data.get(str(target))
+          if user_data is None:
+             raise HTTPException(status_code=500,detail="Not able to fetch user data")
+          return {"user_id": target, "user_data": user_data}
       except:
          raise HTTPException(status_code=500, detail="Not able to fetch the list")
     
@@ -275,23 +281,40 @@ def deleteuser(target: int):
          try:
            with open(json_path, "r") as f:
              data = json.load(f)
-         except Exception as e:
-            print(e)
-            data = {}
+         except:
+            raise HTTPException(status_code=500, detail="not able to load the json file")
       else:
-         data = {}
+         raise HTTPException(status_code=500, detail="json path does not exist")
+      
+      if os.path.exists(user_path):
+         try:
+            with open(user_path,"r") as f:
+               users = json.load(f)
+         except:
+            raise HTTPException(status_code=500, detail="Could not load users")
+      else:
+         raise HTTPException(status_code=500, detail="user file path does not exist")
       
       # searching for the target key and deleting it from the JSON file 
       try:
-          array_of_keys = data.keys()
-          for i in range(0,len(array_of_keys)): 
-             if array_of_keys[i] == str(target): # converting since array_of_keys is a list of string
-                del data[target]
           
+         # deleting the user from the users file
+          users = [u for u in users if str(u) != str(target)]
+         
+         # deleting the user from the userdata file
+          key = str(target)
+          if key not in data:
+             raise HTTPException(status_code=500, detail="the given user id does not exist")
+          del data[key]
+          
+          # dumping updated json files
+          with open(user_path,"w") as f:
+             json.dump(users,f,indent=2)
+
           with open(json_path, "w") as f:
              json.dump(data, f, indent=2)  
          
-          return data
+          return {"message": f'{target} deleted successfully'}
       except:
          raise HTTPException(status_code=500, detail="Not able to fetch the list")
 
